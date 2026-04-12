@@ -1,0 +1,134 @@
+﻿:root {
+    --primary: #1a73e8;
+    --primary-dark: #1557b0;
+    --success: #0f9d58;
+    --warning: #f4b400;
+    --danger: #d93025;
+    --bg: #f8f9fa;
+    --card-bg: #ffffff;
+    --border: #dadce0;
+    --text: #202124;
+    --text-secondary: #5f6368;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+.container {
+    background: var(--card-bg);
+    padding: 2rem;
+    border-radius: 12px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    width: 100%;
+    max-width: 450px;
+}
+h1, h2 { margin-bottom: 0.5rem; }
+form {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    margin: 1.5rem 0;
+}
+input, select, button {
+    padding: 12px 16px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 1rem;
+}
+button {
+    background: var(--primary);
+    color: white;
+    border: none;
+    font-weight: 600;
+    cursor: pointer;
+}
+button:hover { background: var(--primary-dark); }
+.error { color: var(--danger); background: #fce8e6; padding: 8px; border-radius: 6px; margin-top: 1rem; }
+.success { color: var(--success); background: #e6f4ea; padding: 8px; border-radius: 6px; margin-top: 1rem; }
+a { color: var(--primary); text-decoration: none; }
+.dashboard-container {
+    width: 100%;
+    max-width: 1000px;
+    margin: 2rem;
+    background: var(--card-bg);
+    border-radius: 12px;
+    padding: 2rem;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 2rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+}
+.user-info { display: flex; align-items: center; gap: 1rem; }
+.logout-btn { background: #f1f3f4; color: var(--text); padding: 6px 12px; border-radius: 6px; font-size: 0.9rem; }
+.btn-primary {
+    display: inline-block;
+    background: var(--primary);
+    color: white;
+    padding: 12px 20px;
+    border-radius: 8px;
+    font-weight: 600;
+    margin-bottom: 1.5rem;
+}
+.btn-small { background: #e8eaed; color: var(--text); padding: 6px 12px; border-radius: 6px; font-size: 0.9rem; }
+.document-table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+.document-table th, .document-table td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border); }
+.status-badge {
+    padding: 4px 8px;
+    border-radius: 16px;
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+.status-active { background: #e6f4ea; color: var(--success); }
+.status-processing { background: #fef7e0; color: var(--warning); }
+.status-error { background: #fce8e6; color: var(--danger); }
+.analysis-container {
+    width: 100%;
+    max-width: 900px;
+    margin: 2rem;
+    background: var(--card-bg);
+    border-radius: 12px;
+    padding: 2rem;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+.clause-card {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+    background: white;
+}
+.clause-card.risk-low { border-left: 6px solid var(--success); }
+.clause-card.risk-medium { border-left: 6px solid var(--warning); }
+.clause-card.risk-high { border-left: 6px solid #ff9800; }
+.clause-card.risk-critical { border-left: 6px solid var(--danger); }
+.risk-badge {
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: 0.8rem;
+    font-weight: bold;
+    text-transform: uppercase;
+}
+.risk-low .risk-badge { background: #e6f4ea; color: var(--success); }
+.risk-medium .risk-badge { background: #fef7e0; color: var(--warning); }
+.risk-high .risk-badge { background: #fff3e0; color: #ff9800; }
+.risk-critical .risk-badge { background: #fce8e6; color: var(--danger); }
+.clause-text, .suggestion { margin-top: 1rem; }
+.clause-text h3, .suggestion h3 { font-size: 1rem; color: var(--text-secondary); margin-bottom: 0.5rem; }
+.file-upload-area {
+    border: 2px dashed var(--border);
+    border-radius: 8px;
+    padding: 2rem;
+    text-align: center;
+    margin: 1rem 0;
+}

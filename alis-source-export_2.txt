@@ -1,0 +1,1279 @@
+﻿
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\controller\DashboardServlet.java ==========
+
+package za.co.alis.controller;
+
+import za.co.alis.dao.DocumentDAO;
+import za.co.alis.model.User;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.*;
+import java.io.IOException;
+
+public class DashboardServlet extends HttpServlet {
+    protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+        HttpSession session = req.getSession(false);
+        if (session == null || session.getAttribute("user") == null) {
+            resp.sendRedirect("login.jsp");
+            return;
+        }
+        User user = (User) session.getAttribute("user");
+        try {
+            req.setAttribute("documents", new DocumentDAO().findByUser(user.getUserId()));
+            req.getRequestDispatcher("/WEB-INF/views/dashboard.jsp").forward(req, resp);
+        } catch (Exception e) {
+            throw new ServletException(e);
+        }
+    }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\controller\DocumentUploadServlet.java ==========
+
+package za.co.alis.controller;
+
+import com.google.gson.*;
+import za.co.alis.dao.*;
+import za.co.alis.model.*;
+import za.co.alis.util.OllamaClient;
+
+import jakarta.servlet.ServletException;
+import jakarta.servlet.annotation.MultipartConfig;
+import jakarta.servlet.http.*;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.sql.SQLException;
+import java.util.List;
+
+@MultipartConfig
+public class DocumentUploadServlet extends HttpServlet {
+
+    protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+        HttpSession session = req.getSession(false);
+        if (session == null || session.getAttribute("user") == null) {
+            resp.sendRedirect("login.jsp");
+            return;
+        }
+        User user = (User) session.getAttribute("user");
+
+        Part filePart = req.getPart("document");
+        String fileName = filePart.getSubmittedFileName();
+        String content = new String(filePart.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+
+        // Save document with status 'processing'
+        Document doc = new Document();
+        doc.setUserId(user.getUserId());
+        doc.setFilename(fileName);
+        doc.setContent(content);
+        doc.setDocumentHash(OllamaClient.computeSHA256(content));
+        doc.setStatus("processing");
+        doc.setIngestionSource("manual");
+
+        DocumentDAO docDAO = new DocumentDAO();
+        int docId;
+        try {
+            docId = docDAO.save(doc);
+            doc.setDocumentId(docId);
+        } catch (SQLException e) {
+            throw new ServletException("Failed to save document", e);
+        }
+
+        // Build law rules context
+        StringBuilder rulesCtx = new StringBuilder();
+        LawRuleDAO ruleDAO = new LawRuleDAO();
+        List<LawRule> rules;
+        try {
+            rules = ruleDAO.findAll();
+            for (LawRule r : rules) {
+                rulesCtx.append("- Act ID ").append(r.getActId())
+                        .append(", Keyword: ").append(r.getKeyword())
+                        .append(", Requirements: ").append(r.getRequirements())
+                        .append(", Risk: ").append(r.getRiskLevel())
+                        .append(", Suggestion: ").append(r.getSuggestion()).append("\n");
+            }
+        } catch (SQLException e) {
+            try { docDAO.updateStatus(docId, "error"); } catch (SQLException ignored) {}
+            throw new ServletException("Failed to load law rules", e);
+        }
+
+        // Call Ollama
+        OllamaClient ollama = new OllamaClient();
+        String aiJson;
+        try {
+            aiJson = ollama.analyzeDocument(content, rulesCtx.toString());
+        } catch (Exception e) {
+            try { docDAO.updateStatus(docId, "error"); } catch (SQLException ignored) {}
+            throw new ServletException("AI analysis failed", e);
+        }
+
+        // Parse JSON
+        JsonObject result = JsonParser.parseString(aiJson).getAsJsonObject();
+        JsonArray clausesArr = result.getAsJsonArray("clauses");
+
+        // Save clauses and summary reports
+        ClauseDAO clauseDAO = new ClauseDAO();
+        SummaryReportDAO reportDAO = new SummaryReportDAO();
+        LawRule defaultRule = rules.isEmpty() ? null : rules.get(0);
+
+        try {
+            for (JsonElement elem : clausesArr) {
+                JsonObject cObj = elem.getAsJsonObject();
+                Clause clause = new Clause();
+                clause.setDocumentId(docId);
+                clause.setClauseText(cObj.get("clause_text").getAsString());
+                clause.setRiskLevel(cObj.get("risk_level").getAsString());
+                int clauseId = clauseDAO.save(clause);
+
+                if (defaultRule != null) {
+                    SummaryReport report = new SummaryReport();
+                    report.setDocumentId(docId);
+                    report.setUserId(user.getUserId());
+                    report.setRuleId(defaultRule.getRuleId());
+                    report.setSimilarityScore(85.0);
+                    report.setComplianceStatus(cObj.get("risk_level").getAsString().equals("Low") ? "Compliant" : "Non-compliant");
+                    report.setRiskFlag(cObj.get("risk_level").getAsString());
+                    report.setSuggestionText(cObj.get("suggestion").getAsString());
+                    report.setReportText("AI analysis for clause: " + cObj.get("clause_text").getAsString());
+                    reportDAO.save(report);
+                }
+            }
+            docDAO.updateStatus(docId, "active");
+        } catch (SQLException e) {
+            try { docDAO.updateStatus(docId, "error"); } catch (SQLException ignored) {}
+            throw new ServletException("Failed to save analysis results", e);
+        }
+
+        resp.sendRedirect("analysis?docId=" + docId);
+    }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\controller\LoginServlet.java ==========
+
+package za.co.alis.controller;
+
+import za.co.alis.dao.UserDAO;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.*;
+import java.io.IOException;
+
+public class LoginServlet extends HttpServlet {
+    protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+        String email = req.getParameter("email");
+        String pass = req.getParameter("password");
+        try {
+            if (new UserDAO().validateLogin(email, pass)) {
+                HttpSession session = req.getSession();
+                session.setAttribute("user", new UserDAO().findByEmail(email));
+                resp.sendRedirect("dashboard");
+            } else {
+                req.setAttribute("error", "Invalid credentials");
+                req.getRequestDispatcher("/login.jsp").forward(req, resp);
+            }
+        } catch (Exception e) {
+            throw new ServletException(e);
+        }
+    }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\controller\LogoutServlet.java ==========
+
+package za.co.alis.controller;
+
+import jakarta.servlet.http.*;
+import java.io.IOException;
+
+public class LogoutServlet extends HttpServlet {
+    protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws IOException {
+        req.getSession().invalidate();
+        resp.sendRedirect("login.jsp");
+    }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\controller\RegisterServlet.java ==========
+
+package za.co.alis.controller;
+
+import za.co.alis.dao.UserDAO;
+import za.co.alis.model.User;
+import za.co.alis.util.PasswordUtil;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.*;
+import java.io.IOException;
+
+public class RegisterServlet extends HttpServlet {
+    protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+        String fullName = req.getParameter("fullName");
+        String email = req.getParameter("email");
+        String password = req.getParameter("password");
+        String role = req.getParameter("role");
+        User user = new User();
+        user.setFullName(fullName);
+        user.setEmail(email);
+        user.setPasswordHash(PasswordUtil.hash(password));
+        user.setRole(role);
+        try {
+            new UserDAO().create(user);
+            resp.sendRedirect("login.jsp?registered=1");
+        } catch (Exception e) {
+            req.setAttribute("error", e.getMessage());
+            req.getRequestDispatcher("/register.jsp").forward(req, resp);
+        }
+    }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\controller\ViewAnalysisServlet.java ==========
+
+package za.co.alis.controller;
+
+import za.co.alis.dao.*;
+import za.co.alis.model.*;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.*;
+import java.io.IOException;
+import java.util.List;
+
+public class ViewAnalysisServlet extends HttpServlet {
+    protected void doGet(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+        HttpSession session = req.getSession(false);
+        if (session == null || session.getAttribute("user") == null) {
+            resp.sendRedirect("login.jsp");
+            return;
+        }
+        int docId = Integer.parseInt(req.getParameter("docId"));
+        try {
+            Document doc = new DocumentDAO().findById(docId);
+            List<Clause> clauses = new ClauseDAO().findByDocument(docId);
+            req.setAttribute("document", doc);
+            req.setAttribute("clauses", clauses);
+            req.getRequestDispatcher("/WEB-INF/views/analysis.jsp").forward(req, resp);
+        } catch (Exception e) {
+            throw new ServletException(e);
+        }
+    }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\dao\ClauseDAO.java ==========
+
+package za.co.alis.dao;
+
+import za.co.alis.model.Clause;
+import java.sql.*;
+import java.util.ArrayList;
+import java.util.List;
+
+public class ClauseDAO {
+    public int save(Clause clause) throws SQLException {
+        String sql = "INSERT INTO clauses (document_id, clause_text, risk_level) VALUES (?, ?, ?) RETURNING clause_id";
+        try (Connection conn = DBConnection.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setInt(1, clause.getDocumentId());
+            stmt.setString(2, clause.getClauseText());
+            stmt.setString(3, clause.getRiskLevel());
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) return rs.getInt(1);
+        }
+        return -1;
+    }
+
+    public List<Clause> findByDocument(int docId) throws SQLException {
+        List<Clause> list = new ArrayList<>();
+        String sql = "SELECT * FROM clauses WHERE document_id = ?";
+        try (Connection conn = DBConnection.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setInt(1, docId);
+            ResultSet rs = stmt.executeQuery();
+            while (rs.next()) {
+                Clause c = new Clause();
+                c.setClauseId(rs.getInt("clause_id"));
+                c.setDocumentId(rs.getInt("document_id"));
+                c.setClauseText(rs.getString("clause_text"));
+                c.setRiskLevel(rs.getString("risk_level"));
+                list.add(c);
+            }
+        }
+        return list;
+    }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\dao\DBConnection.java ==========
+
+package za.co.alis.dao;
+
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
+
+public class DBConnection {
+   private static final String URL = "jdbc:postgresql://localhost:5432/ALIS_WEBAPPDB";
+private static final String USER = "alis_user";
+private static final String PASS = "alis2024"; // if that's your password
+
+    static {
+        try { Class.forName("org.postgresql.Driver"); }
+        catch (ClassNotFoundException e) { e.printStackTrace(); }
+    }
+
+    public static Connection getConnection() throws SQLException {
+        return DriverManager.getConnection(URL, USER, PASS);
+    }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\dao\DocumentDAO.java ==========
+
+package za.co.alis.dao;
+
+import za.co.alis.model.*;
+import java.sql.*;
+import java.util.ArrayList;
+import java.util.List;
+
+public class DocumentDAO {
+    public int save(Document doc) throws SQLException {
+        String sql = "INSERT INTO documents (user_id, filename, content, document_hash, status, ingestion_source) VALUES (?, ?, ?, ?, ?, ?) RETURNING document_id";
+        try (Connection conn = DBConnection.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setInt(1, doc.getUserId());
+            stmt.setString(2, doc.getFilename());
+            stmt.setString(3, doc.getContent());
+            stmt.setString(4, doc.getDocumentHash());
+            stmt.setString(5, doc.getStatus());
+            stmt.setString(6, doc.getIngestionSource());
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) return rs.getInt(1);
+        }
+        return -1;
+    }
+
+    public Document findById(int docId) throws SQLException {
+        String sql = "SELECT * FROM documents WHERE document_id = ?";
+        try (Connection conn = DBConnection.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setInt(1, docId);
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) {
+                Document d = new Document();
+                d.setDocumentId(rs.getInt("document_id"));
+                d.setUserId(rs.getInt("user_id"));
+                d.setFilename(rs.getString("filename"));
+                d.setContent(rs.getString("content"));
+                d.setDocumentHash(rs.getString("document_hash"));
+                d.setStatus(rs.getString("status"));
+                d.setIngestionSource(rs.getString("ingestion_source"));
+                d.setUploadedAt(rs.getTimestamp("uploaded_at"));
+                return d;
+            }
+        }
+        return null;
+    }
+
+    public List<Document> findByUser(String userId) throws SQLException {
+        List<Document> list = new ArrayList<>();
+        String sql = "SELECT * FROM documents WHERE user_id = ? ORDER BY uploaded_at DESC";
+        try (Connection conn = DBConnection.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, userId);
+            ResultSet rs = stmt.executeQuery();
+            while (rs.next()) {
+                Document d = new Document();
+                d.setDocumentId(rs.getInt("document_id"));
+                d.setUserId(rs.getInt("user_id"));
+                d.setFilename(rs.getString("filename"));
+                d.setStatus(rs.getString("status"));
+                d.setUploadedAt(rs.getTimestamp("uploaded_at"));
+                list.add(d);
+            }
+        }
+        return list;
+    }
+
+    public void updateStatus(int docId, String status) throws SQLException {
+        String sql = "UPDATE documents SET status = ? WHERE document_id = ?";
+        try (Connection conn = DBConnection.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, status);
+            stmt.setInt(2, docId);
+            stmt.executeUpdate();
+        }
+    }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\dao\LawRuleDAO.java ==========
+
+package za.co.alis.dao;
+
+import za.co.alis.model.LawRule;
+import java.sql.*;
+import java.util.ArrayList;
+import java.util.List;
+
+public class LawRuleDAO {
+    public List<LawRule> findAll() throws SQLException {
+        List<LawRule> list = new ArrayList<>();
+        String sql = "SELECT r.rule_id, r.act_id, r.keyword, r.requirements, r.risk_level, r.suggestion, a.act_name " +
+                     "FROM law_rules r JOIN acts a ON r.act_id = a.act_id";
+        try (Connection conn = DBConnection.getConnection();
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(sql)) {
+            while (rs.next()) {
+                LawRule lr = new LawRule();
+                lr.setRuleId(rs.getInt("rule_id"));
+                lr.setActId(rs.getInt("act_id"));
+                lr.setKeyword(rs.getString("keyword"));
+                lr.setRequirements(rs.getString("requirements"));
+                lr.setRiskLevel(rs.getString("risk_level"));
+                lr.setSuggestion(rs.getString("suggestion"));
+                // store act name in keyword for context building (hack)
+                list.add(lr);
+            }
+        }
+        return list;
+    }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\dao\SummaryReportDAO.java ==========
+
+package za.co.alis.dao;
+
+import za.co.alis.model.SummaryReport;
+import java.sql.*;
+
+public class SummaryReportDAO {
+    public void save(SummaryReport report) throws SQLException {
+        String sql = "INSERT INTO summary_reports (document_id, user_id, rule_id, similarity_score, compliance_status, risk_flag, suggestion_text, report_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+        try (Connection conn = DBConnection.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setInt(1, report.getDocumentId());
+            stmt.setString(2, report.getUserId());
+            stmt.setInt(3, report.getRuleId());
+            stmt.setDouble(4, report.getSimilarityScore());
+            stmt.setString(5, report.getComplianceStatus());
+            stmt.setString(6, report.getRiskFlag());
+            stmt.setString(7, report.getSuggestionText());
+            stmt.setString(8, report.getReportText());
+            stmt.executeUpdate();
+        }
+    }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\dao\UserDAO.java ==========
+
+package za.co.alis.dao;
+
+import za.co.alis.model.User;
+import za.co.alis.util.PasswordUtil;
+import java.sql.*;
+
+public class UserDAO {
+    public void create(User user) throws SQLException {
+        String sql = "INSERT INTO users (full_name, email, password_hash, role) VALUES (?, ?, ?, ?)";
+        try (Connection conn = DBConnection.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, user.getFullName());
+            stmt.setString(2, user.getEmail());
+            stmt.setString(3, user.getPasswordHash());
+            stmt.setString(4, user.getRole());
+            stmt.executeUpdate();
+        }
+    }
+
+    public User findByEmail(String email) throws SQLException {
+        String sql = "SELECT * FROM users WHERE email = ?";
+        try (Connection conn = DBConnection.getConnection();
+             PreparedStatement stmt = conn.prepareStatement(sql)) {
+            stmt.setString(1, email);
+            ResultSet rs = stmt.executeQuery();
+            if (rs.next()) {
+                User u = new User();
+                ResultSetMetaData meta = rs.getMetaData();
+                int columnCount = meta.getColumnCount();
+                boolean hasUserId = false;
+                for (int i = 1; i <= columnCount; i++) {
+                    String colName = meta.getColumnLabel(i).toLowerCase();
+                    if ("user_id".equals(colName) || "id".equals(colName) || "userid".equals(colName)) {
+                       u.setUserId(rs.getInt("user_id"));
+                        hasUserId = true;
+                        break;
+                    }
+                }
+                if (!hasUserId) {
+                    u.setUserId(0);
+                }
+                u.setFullName(getStringIfExists(rs, meta, "full_name", "fullname", "name"));
+                u.setEmail(getStringIfExists(rs, meta, "email"));
+                u.setPasswordHash(getStringIfExists(rs, meta, "password_hash", "passwordhash", "password"));
+                u.setRole(getStringIfExists(rs, meta, "role"));
+                u.setCreatedAt(getTimestampIfExists(rs, meta, "created_at", "createdat", "created"));
+                return u;
+            }
+        }
+        return null;
+    }
+
+    private String getStringIfExists(ResultSet rs, ResultSetMetaData meta, String... candidates) throws SQLException {
+        for (int i = 1; i <= meta.getColumnCount(); i++) {
+            String colName = meta.getColumnLabel(i).toLowerCase();
+            for (String candidate : candidates) {
+                if (candidate.equals(colName)) {
+                    return rs.getString(i);
+                }
+            }
+        }
+        return null;
+    }
+
+    private java.sql.Timestamp getTimestampIfExists(ResultSet rs, ResultSetMetaData meta, String... candidates) throws SQLException {
+        for (int i = 1; i <= meta.getColumnCount(); i++) {
+            String colName = meta.getColumnLabel(i).toLowerCase();
+            for (String candidate : candidates) {
+                if (candidate.equals(colName)) {
+                    return rs.getTimestamp(i);
+                }
+            }
+        }
+        return null;
+    }
+
+    public boolean validateLogin(String email, String plainPassword) throws SQLException {
+        User user = findByEmail(email);
+        return user != null && PasswordUtil.checkPassword(plainPassword, user.getPasswordHash());
+    }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\model\Act.java ==========
+
+package za.co.alis.model;
+
+public class Act {
+    private int actId;
+    private String actName;
+    private String actNumber;
+    private int actYear;
+    private String actSection;
+    private String description;
+    private String jurisdiction;
+
+    // Getters and setters (omitted for brevity)
+    public int getActId() { return actId; }
+    public void setActId(int actId) { this.actId = actId; }
+    public String getActName() { return actName; }
+    public void setActName(String actName) { this.actName = actName; }
+    public String getActNumber() { return actNumber; }
+    public void setActNumber(String actNumber) { this.actNumber = actNumber; }
+    public int getActYear() { return actYear; }
+    public void setActYear(int actYear) { this.actYear = actYear; }
+    public String getActSection() { return actSection; }
+    public void setActSection(String actSection) { this.actSection = actSection; }
+    public String getDescription() { return description; }
+    public void setDescription(String description) { this.description = description; }
+    public String getJurisdiction() { return jurisdiction; }
+    public void setJurisdiction(String jurisdiction) { this.jurisdiction = jurisdiction; }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\model\Clause.java ==========
+
+package za.co.alis.model;
+
+public class Clause {
+    private int clauseId;
+    private int documentId;
+    private String clauseText;
+    private String riskLevel;
+
+    // Getters and setters
+    public int getClauseId() { return clauseId; }
+    public void setClauseId(int clauseId) { this.clauseId = clauseId; }
+    public int getDocumentId() { return documentId; }
+    public void setDocumentId(int documentId) { this.documentId = documentId; }
+    public String getClauseText() { return clauseText; }
+    public void setClauseText(String clauseText) { this.clauseText = clauseText; }
+    public String getRiskLevel() { return riskLevel; }
+    public void setRiskLevel(String riskLevel) { this.riskLevel = riskLevel; }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\model\Document.java ==========
+
+package za.co.alis.model;
+
+import java.sql.Timestamp;
+
+public class Document {
+    private int documentId;
+    private String userId;
+    private String filename;
+    private String content;
+    private String documentHash;
+    private String status;
+    private String ingestionSource;
+    private Timestamp uploadedAt;
+
+    // Getters and setters
+    public int getDocumentId() { return documentId; }
+    public void setDocumentId(int documentId) { this.documentId = documentId; }
+    public String getUserId() { return userId; }
+    public void setUserId(String userId) { this.userId = userId; }
+    public String getFilename() { return filename; }
+    public void setFilename(String filename) { this.filename = filename; }
+    public String getContent() { return content; }
+    public void setContent(String content) { this.content = content; }
+    public String getDocumentHash() { return documentHash; }
+    public void setDocumentHash(String documentHash) { this.documentHash = documentHash; }
+    public String getStatus() { return status; }
+    public void setStatus(String status) { this.status = status; }
+    public String getIngestionSource() { return ingestionSource; }
+    public void setIngestionSource(String ingestionSource) { this.ingestionSource = ingestionSource; }
+    public Timestamp getUploadedAt() { return uploadedAt; }
+    public void setUploadedAt(Timestamp uploadedAt) { this.uploadedAt = uploadedAt; }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\model\LawRule.java ==========
+
+package za.co.alis.model;
+
+public class LawRule {
+    private int ruleId;
+    private int actId;
+    private String keyword;
+    private String requirements;
+    private String riskLevel;
+    private String suggestion;
+    private boolean edited;
+
+    // Getters and setters
+    public int getRuleId() { return ruleId; }
+    public void setRuleId(int ruleId) { this.ruleId = ruleId; }
+    public int getActId() { return actId; }
+    public void setActId(int actId) { this.actId = actId; }
+    public String getKeyword() { return keyword; }
+    public void setKeyword(String keyword) { this.keyword = keyword; }
+    public String getRequirements() { return requirements; }
+    public void setRequirements(String requirements) { this.requirements = requirements; }
+    public String getRiskLevel() { return riskLevel; }
+    public void setRiskLevel(String riskLevel) { this.riskLevel = riskLevel; }
+    public String getSuggestion() { return suggestion; }
+    public void setSuggestion(String suggestion) { this.suggestion = suggestion; }
+    public boolean isEdited() { return edited; }
+    public void setEdited(boolean edited) { this.edited = edited; }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\model\SummaryReport.java ==========
+
+package za.co.alis.model;
+
+public class SummaryReport {
+    private int reportId;
+    private int documentId;
+    private int userId;
+    private int ruleId;
+    private double similarityScore;
+    private String complianceStatus;
+    private String riskFlag;
+    private String suggestionText;
+    private String reportText;
+
+    // Getters and setters
+    public int getReportId() { return reportId; }
+    public void setReportId(int reportId) { this.reportId = reportId; }
+    public int getDocumentId() { return documentId; }
+    public void setDocumentId(int documentId) { this.documentId = documentId; }
+    public int getUserId() { return userId; }
+    public void setUserId(int userId) { this.userId = userId; }
+    public int getRuleId() { return ruleId; }
+    public void setRuleId(int ruleId) { this.ruleId = ruleId; }
+    public double getSimilarityScore() { return similarityScore; }
+    public void setSimilarityScore(double similarityScore) { this.similarityScore = similarityScore; }
+    public String getComplianceStatus() { return complianceStatus; }
+    public void setComplianceStatus(String complianceStatus) { this.complianceStatus = complianceStatus; }
+    public String getRiskFlag() { return riskFlag; }
+    public void setRiskFlag(String riskFlag) { this.riskFlag = riskFlag; }
+    public String getSuggestionText() { return suggestionText; }
+    public void setSuggestionText(String suggestionText) { this.suggestionText = suggestionText; }
+    public String getReportText() { return reportText; }
+    public void setReportText(String reportText) { this.reportText = reportText; }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\model\User.java ==========
+
+package za.co.alis.model;
+
+import java.sql.Timestamp;
+
+public class User {
+    private String userId;
+    private String fullName;
+    private String email;
+    private String passwordHash;
+    private String role;
+    private Timestamp createdAt;
+
+    // Getters and setters (omitted for brevity but generated below)
+    public String getUserId() { return userId; }
+    public void setUserId(String userId) { this.userId = userId; }
+    public String getFullName() { return fullName; }
+    public void setFullName(String fullName) { this.fullName = fullName; }
+    public String getEmail() { return email; }
+    public void setEmail(String email) { this.email = email; }
+    public String getPasswordHash() { return passwordHash; }
+    public void setPasswordHash(String passwordHash) { this.passwordHash = passwordHash; }
+    public String getRole() { return role; }
+    public void setRole(String role) { this.role = role; }
+    public Timestamp getCreatedAt() { return createdAt; }
+    public void setCreatedAt(Timestamp createdAt) { this.createdAt = createdAt; }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\util\OllamaClient.java ==========
+
+package za.co.alis.util;
+
+import com.google.gson.*;
+import okhttp3.*;
+import java.io.IOException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.TimeUnit;
+
+public class OllamaClient {
+    private static final String OLLAMA_URL = "http://localhost:11434/api/generate";
+    private static final String MODEL = "llama3"; // or qwen2.5-coder
+    private final OkHttpClient client;
+    private final Gson gson;
+
+    public OllamaClient() {
+        this.client = new OkHttpClient.Builder()
+                .connectTimeout(60, TimeUnit.SECONDS)
+                .readTimeout(180, TimeUnit.SECONDS)
+                .build();
+        this.gson = new Gson();
+    }
+
+    public String analyzeDocument(String documentText, String lawRulesContext) throws IOException {
+        String prompt = buildPrompt(documentText, lawRulesContext);
+        
+        JsonObject reqBody = new JsonObject();
+        reqBody.addProperty("model", MODEL);
+        reqBody.addProperty("prompt", prompt);
+        reqBody.addProperty("stream", false);
+        reqBody.addProperty("format", "json");
+
+        Request request = new Request.Builder()
+                .url(OLLAMA_URL)
+                .post(RequestBody.create(reqBody.toString(), MediaType.parse("application/json")))
+                .build();
+
+        try (Response response = client.newCall(request).execute()) {
+            if (!response.isSuccessful()) throw new IOException("Ollama error: " + response);
+            JsonObject jsonResp = gson.fromJson(response.body().string(), JsonObject.class);
+            return jsonResp.get("response").getAsString();
+        }
+    }
+
+    private String buildPrompt(String documentText, String lawRulesContext) {
+        return """
+            You are a legal AI assistant specialized in South African contract law.
+            Analyze the following document and return a JSON object with this exact structure:
+            {
+              "deal_type": "string",
+              "sector": "string",
+              "clauses": [
+                {
+                  "clause_text": "exact text from document",
+                  "risk_level": "Low|Medium|High|Critical",
+                  "suggestion": "improvement suggestion if any"
+                }
+              ]
+            }
+
+            Relevant South African legislation and compliance rules:
+            %s
+
+            Document text:
+            %s
+
+            Important: Output only valid JSON. No extra commentary.
+            """.formatted(lawRulesContext, documentText);
+    }
+
+    public static String computeSHA256(String content) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(content.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte b : hash) sb.append(String.format("%02x", b));
+            return sb.toString();
+        } catch (NoSuchAlgorithmException e) {
+            throw new RuntimeException(e);
+        }
+    }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\java\za\co\alis\util\PasswordUtil.java ==========
+
+package za.co.alis.util;
+
+import org.mindrot.jbcrypt.BCrypt;
+
+public class PasswordUtil {
+    public static String hash(String plain) {
+        return BCrypt.hashpw(plain, BCrypt.gensalt());
+    }
+    public static boolean checkPassword(String plain, String hashed) {
+        return BCrypt.checkpw(plain, hashed);
+    }
+}
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\webapp\WEB-INF\views\analysis.jsp ==========
+
+<%@ page contentType="text/html;charset=UTF-8" language="java" %>
+<%@ page import="za.co.alis.model.User, za.co.alis.model.Document, java.util.List, za.co.alis.model.Clause" %>
+<%
+    User user = (User) session.getAttribute("user");
+    if (user == null) {
+        response.sendRedirect(request.getContextPath() + "/login.jsp");
+        return;
+    }
+    Document document = (Document) request.getAttribute("document");
+    List<Clause> clauses = (List<Clause>) request.getAttribute("clauses");
+%>
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Analysis Results - <%= document.getFilename() %></title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="analysis-container">
+        <header>
+            <h1>📊 Analysis Results</h1>
+            <p>Document: <strong><%= document.getFilename() %></strong> | Uploaded: <%= document.getUploadedAt() %></p>
+            <a href="dashboard" class="btn-small">← Back to Dashboard</a>
+        </header>
+
+        <div class="analysis-summary">
+            <h2>AI Compliance Check</h2>
+            <p>Clauses extracted and analyzed against South African legislation.</p>
+        </div>
+
+        <% if (clauses == null || clauses.isEmpty()) { %>
+            <p class="empty-state">No clauses were identified.</p>
+        <% } else { %>
+            <div class="clauses-list">
+                <% for (Clause clause : clauses) { %>
+                    <div class="clause-card risk-<%= clause.getRiskLevel().toLowerCase() %>">
+                        <div class="clause-header">
+                            <span class="risk-badge"><%= clause.getRiskLevel() %></span>
+                        </div>
+                        <div class="clause-text">
+                            <h3>Clause Text</h3>
+                            <p><%= clause.getClauseText() %></p>
+                        </div>
+                        <div class="suggestion">
+                            <h3>AI Suggestion</h3>
+                            <p>Review this clause for compliance.</p>
+                        </div>
+                    </div>
+                <% } %>
+            </div>
+        <% } %>
+    </div>
+</body>
+</html>
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\webapp\WEB-INF\views\dashboard.jsp ==========
+
+<%@ page contentType="text/html;charset=UTF-8" language="java" %>
+<%@ page import="za.co.alis.model.User, java.util.List, za.co.alis.model.Document" %>
+<%
+    User user = (User) session.getAttribute("user");
+    if (user == null) {
+        response.sendRedirect(request.getContextPath() + "/login.jsp");
+        return;
+    }
+    List<Document> documents = (List<Document>) request.getAttribute("documents");
+%>
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ALIS Dashboard</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="dashboard-container">
+        <header>
+            <h1>⚖️ ALIS Dashboard</h1>
+            <div class="user-info">
+                Welcome, <%= user.getFullName() %> (<%= user.getRole() %>)
+                <a href="logout" class="logout-btn">Logout</a>
+            </div>
+        </header>
+
+        <div class="actions">
+            <a href="upload.jsp" class="btn-primary">📄 Upload New Document</a>
+        </div>
+
+        <h2>Your Documents</h2>
+        <% if (documents == null || documents.isEmpty()) { %>
+            <p class="empty-state">No documents uploaded yet.</p>
+        <% } else { %>
+            <table class="document-table">
+                <thead>
+                    <tr>
+                        <th>Filename</th>
+                        <th>Status</th>
+                        <th>Uploaded</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <% for (Document doc : documents) { %>
+                        <tr>
+                            <td><%= doc.getFilename() %></td>
+                            <td><span class="status-badge status-<%= doc.getStatus().toLowerCase() %>"><%= doc.getStatus() %></span></td>
+                            <td><%= doc.getUploadedAt() %></td>
+                            <td>
+                                <% if ("active".equals(doc.getStatus())) { %>
+                                    <a href="analysis?docId=<%= doc.getDocumentId() %>" class="btn-small">View Analysis</a>
+                                <% } else if ("processing".equals(doc.getStatus())) { %>
+                                    <span>Processing...</span>
+                                <% } else { %>
+                                    <span>Error</span>
+                                <% } %>
+                            </td>
+                        </tr>
+                    <% } %>
+                </tbody>
+            </table>
+        <% } %>
+    </div>
+</body>
+</html>
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\webapp\WEB-INF\upload.jsp ==========
+
+<%@ page contentType="text/html;charset=UTF-8" language="java" %>
+<%@ page import="za.co.alis.model.User" %>
+<%
+    User user = (User) session.getAttribute("user");
+    if (user == null) {
+        response.sendRedirect(request.getContextPath() + "/login.jsp");
+        return;
+    }
+%>
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Upload Document - ALIS</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>📤 Upload Legal Document</h1>
+        <p>Supported format: .txt</p>
+        <form method="post" action="upload" enctype="multipart/form-data">
+            <div class="file-upload-area">
+                <input type="file" name="document" accept=".txt,text/plain" required>
+            </div>
+            <button type="submit" class="btn-primary">Analyze with AI</button>
+        </form>
+        <p><a href="dashboard">← Back to Dashboard</a></p>
+        <% if (request.getAttribute("error") != null) { %>
+            <p class="error"><%= request.getAttribute("error") %></p>
+        <% } %>
+    </div>
+</body>
+</html>
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\webapp\WEB-INF\web.xml ==========
+
+<?xml version="1.0" encoding="UTF-8"?>
+<web-app xmlns="https://jakarta.ee/xml/ns/jakartaee"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="https://jakarta.ee/xml/ns/jakartaee
+         https://jakarta.ee/xml/ns/jakartaee/web-app_5_0.xsd"
+         version="5.0">
+
+    <display-name>ALIS Legal Intelligence</display-name>
+
+    <servlet>
+        <servlet-name>RegisterServlet</servlet-name>
+        <servlet-class>za.co.alis.controller.RegisterServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>RegisterServlet</servlet-name>
+        <url-pattern>/register</url-pattern>
+    </servlet-mapping>
+
+    <servlet>
+        <servlet-name>LoginServlet</servlet-name>
+        <servlet-class>za.co.alis.controller.LoginServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>LoginServlet</servlet-name>
+        <url-pattern>/login</url-pattern>
+    </servlet-mapping>
+
+    <servlet>
+        <servlet-name>LogoutServlet</servlet-name>
+        <servlet-class>za.co.alis.controller.LogoutServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>LogoutServlet</servlet-name>
+        <url-pattern>/logout</url-pattern>
+    </servlet-mapping>
+
+    <servlet>
+        <servlet-name>DashboardServlet</servlet-name>
+        <servlet-class>za.co.alis.controller.DashboardServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>DashboardServlet</servlet-name>
+        <url-pattern>/dashboard</url-pattern>
+    </servlet-mapping>
+
+    <servlet>
+        <servlet-name>DocumentUploadServlet</servlet-name>
+        <servlet-class>za.co.alis.controller.DocumentUploadServlet</servlet-class>
+        <multipart-config>
+            <max-file-size>10485760</max-file-size>
+            <max-request-size>20971520</max-request-size>
+            <file-size-threshold>1048576</file-size-threshold>
+        </multipart-config>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>DocumentUploadServlet</servlet-name>
+        <url-pattern>/upload</url-pattern>
+    </servlet-mapping>
+
+    <servlet>
+        <servlet-name>ViewAnalysisServlet</servlet-name>
+        <servlet-class>za.co.alis.controller.ViewAnalysisServlet</servlet-class>
+    </servlet>
+    <servlet-mapping>
+        <servlet-name>ViewAnalysisServlet</servlet-name>
+        <url-pattern>/analysis</url-pattern>
+    </servlet-mapping>
+
+    <welcome-file-list>
+        <welcome-file>login.jsp</welcome-file>
+    </welcome-file-list>
+
+    <session-config>
+        <session-timeout>30</session-timeout>
+    </session-config>
+</web-app>
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\webapp\chat.jsp ==========
+
+<%@ page contentType="text/html;charset=UTF-8" %>
+<%@ page import="za.co.alis.model.User" %>
+<%
+    User user = (User) session.getAttribute("user");
+    if (user == null) {
+        response.sendRedirect("login.jsp");
+        return;
+    }
+%>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ALIS AI Chat – <%= user.getFullName() %></title>
+  <link rel="stylesheet" href="css/chat.css">
+</head>
+<body>
+  <div class="chat-container">
+    <header class="chat-header">
+      <h1>👨‍💻 Senior Dev Assistant</h1>
+      <p>Welcome, <%= user.getFullName() %> | <a href="logout">Logout</a></p>
+    </header>
+    <div class="chat-messages" id="chatMessages"></div>
+    <div class="chat-input-area">
+      <textarea id="promptInput" placeholder="Ask a coding question..." rows="1"></textarea>
+      <button id="sendBtn">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+  <script src="js/chat.js"></script>
+</body>
+</html>
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\webapp\index.jsp ==========
+
+<%@ page contentType="text/html;charset=UTF-8" %>
+<% response.sendRedirect("login.jsp"); %>
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\webapp\login.jsp ==========
+
+<%@ page contentType="text/html;charset=UTF-8" language="java" %>
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ALIS Login</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>⚖️ ALIS</h1>
+        <h2>Legal Intelligence System</h2>
+        <form method="post" action="login">
+            <input type="email" name="email" placeholder="Email" required>
+            <input type="password" name="password" placeholder="Password" required>
+            <button type="submit">Login</button>
+        </form>
+        <p>New user? <a href="register.jsp">Create account</a></p>
+        <% if (request.getParameter("registered") != null) { %>
+            <p class="success">Registration successful! Please login.</p>
+        <% } %>
+        <% if (request.getAttribute("error") != null) { %>
+            <p class="error"><%= request.getAttribute("error") %></p>
+        <% } %>
+    </div>
+</body>
+</html>
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\src\main\webapp\register.jsp ==========
+
+<%@ page contentType="text/html;charset=UTF-8" language="java" %>
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ALIS Register</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>⚖️ ALIS</h1>
+        <h2>Create Account</h2>
+        <form method="post" action="register">
+            <input type="text" name="fullName" placeholder="Full Name" required>
+            <input type="email" name="email" placeholder="Email" required>
+            <input type="password" name="password" placeholder="Password" required>
+            <select name="role" required>
+                <option value="">Select Role</option>
+                <option value="attorney">Attorney</option>
+                <option value="paralegal">Paralegal</option>
+                <option value="user">Legal Professional</option>
+            </select>
+            <button type="submit">Register</button>
+        </form>
+        <p>Already have an account? <a href="login.jsp">Login</a></p>
+        <% if (request.getAttribute("error") != null) { %>
+            <p class="error"><%= request.getAttribute("error") %></p>
+        <% } %>
+    </div>
+</body>
+</html>
+
+
+========== C:\Users\lunga\OneDrive\Desktop\alis-web_v2\pom.xml ==========
+
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>za.co.alis</groupId>
+    <artifactId>alis-legal</artifactId>
+    <version>1.0-SNAPSHOT</version>
+    <packaging>war</packaging>
+
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <dependencies>
+       <dependency>
+    <groupId>jakarta.servlet</groupId>
+    <artifactId>jakarta.servlet-api</artifactId>
+    <version>5.0.0</version>
+    <scope>provided</scope>
+</dependency>
+        <dependency>
+    <groupId>jakarta.servlet.jsp</groupId>
+    <artifactId>jakarta.servlet.jsp-api</artifactId>
+    <version>3.0.0</version>
+    <scope>provided</scope>
+</dependency>
+       <dependency>
+    <groupId>jakarta.servlet.jsp.jstl</groupId>
+    <artifactId>jakarta.servlet.jsp.jstl-api</artifactId>
+    <version>2.0.0</version>
+</dependency>
+        <dependency>
+    <groupId>org.glassfish.web</groupId>
+    <artifactId>jakarta.servlet.jsp.jstl</artifactId>
+    <version>2.0.0</version>
+</dependency>
+        <dependency>
+            <groupId>commons-fileupload</groupId>
+            <artifactId>commons-fileupload</artifactId>
+            <version>1.5</version>
+        </dependency>
+        <dependency>
+            <groupId>commons-io</groupId>
+            <artifactId>commons-io</artifactId>
+            <version>2.15.1</version>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.6.0</version>
+        </dependency>
+        <dependency>
+            <groupId>com.squareup.okhttp3</groupId>
+            <artifactId>okhttp</artifactId>
+            <version>4.12.0</version>
+        </dependency>
+        <dependency>
+            <groupId>com.google.code.gson</groupId>
+            <artifactId>gson</artifactId>
+            <version>2.10.1</version>
+        </dependency>
+        <dependency>
+            <groupId>org.mindrot</groupId>
+            <artifactId>jbcrypt</artifactId>
+            <version>0.4</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>alis</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-war-plugin</artifactId>
+                <version>3.3.2</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>
