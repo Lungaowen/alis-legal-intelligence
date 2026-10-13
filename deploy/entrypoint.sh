@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${REDIS_URL:?Set REDIS_URL}"
+export REDIS_URL="redis://127.0.0.1:6379/0"
 
 PORT="${PORT:-10000}"
 python3 - "$PORT" <<'PY'
