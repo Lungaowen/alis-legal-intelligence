@@ -8,7 +8,7 @@ FROM tomcat:10.1-jdk17-temurin
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git python3 python3-venv build-essential supervisor && rm -rf /var/lib/apt/lists/*
 ARG ALIS_PYTHON_COMMIT=929c8aeb69e81bb8b7df60de7c936806dc277f1f
-RUN git clone --depth 1 --branch security/remove-hardcoded-redis-fallback https://github.com/Lungaowen/alis_python_backend.git /opt/alis-python && test "$(git -C /opt/alis-python rev-parse HEAD)" = "\${ALIS_PYTHON_COMMIT}"
+RUN git clone --depth 1 --branch security/remove-hardcoded-redis-fallback https://github.com/Lungaowen/alis_python_backend.git /opt/alis-python && test "$(git -C /opt/alis-python rev-parse HEAD)" = "$ALIS_PYTHON_COMMIT"
 RUN python3 -m venv /opt/alis-venv && /opt/alis-venv/bin/pip install --no-cache-dir --upgrade pip && /opt/alis-venv/bin/pip install --no-cache-dir -r /opt/alis-python/requirements.txt
 RUN useradd --system --home /nonexistent --shell /usr/sbin/nologin alis && rm -rf /usr/local/tomcat/webapps/* && mkdir -p /var/log/supervisor && chown -R alis:alis /opt/alis-python
 COPY deploy/triage_service.py /opt/alis-python/triage_service.py
