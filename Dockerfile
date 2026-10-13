@@ -1,5 +1,5 @@
 # Combined ALIS deployment: Java WAR + Python FastAPI + Celery worker.
-# The Python backend is public and pinned to a known commit for repeatable builds.
+# Python source is pinned to a security branch commit for repeatable builds.
 
 FROM maven:3.9-eclipse-temurin-17 AS java-build
 WORKDIR /build/java
@@ -18,8 +18,8 @@ RUN apt-get update \
        ca-certificates git python3 python3-venv build-essential supervisor \
     && rm -rf /var/lib/apt/lists/*
 
-ARG ALIS_PYTHON_COMMIT=57df7c9dfcfb7ee21937c9714c890bbe94214b22
-RUN git clone --depth 1 --branch main https://github.com/Lungaowen/alis_python_backend.git /opt/alis-python \
+ARG ALIS_PYTHON_COMMIT=929c8aeb69e81bb8b7df60de7c936806dc277f1f
+RUN git clone --depth 1 --branch security/remove-hardcoded-redis-fallback https://github.com/Lungaowen/alis_python_backend.git /opt/alis-python \
     && test "$(git -C /opt/alis-python rev-parse HEAD)" = "${ALIS_PYTHON_COMMIT}"
 
 RUN python3 -m venv /opt/alis-venv \
