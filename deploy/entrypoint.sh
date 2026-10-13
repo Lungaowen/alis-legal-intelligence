@@ -10,7 +10,8 @@ if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-# Render routes HTTP traffic to PORT. Update only Tomcat's HTTP connector.
+# Render should only see the public HTTP connector. Disable Tomcat's separate
+# shutdown socket so platform port detection cannot mistake it for HTTP.
 python3 - "$PORT" <<'PY'
 import re
 import sys
@@ -19,16 +20,28 @@ from pathlib import Path
 port = sys.argv[1]
 path = Path("/usr/local/tomcat/conf/server.xml")
 config = path.read_text(encoding="utf-8")
-updated, count = re.subn(
+
+config, server_count = re.subn(
+    r'(<Server\b[^>]*?\bport=")-?\d+(")',
+    lambda match: f"{match.group(1)}-1{match.group(2)}",
+    config,
+    count=1,
+    flags=re.DOTALL,
+)
+if server_count != 1:
+    raise SystemExit("Could not disable Tomcat's shutdown socket")
+
+config, connector_count = re.subn(
     r'(<Connector\b[^>]*?\bport=")8080(")',
     lambda match: f"{match.group(1)}{port}{match.group(2)}",
     config,
     count=1,
     flags=re.DOTALL,
 )
-if count != 1:
+if connector_count != 1:
     raise SystemExit("Could not find Tomcat's default HTTP connector on port 8080")
-path.write_text(updated, encoding="utf-8")
+
+path.write_text(config, encoding="utf-8")
 PY
 
 # Keep the JVM conservative; Java, FastAPI, and Celery share this instance.
