@@ -26,13 +26,15 @@ RUN python3 -m venv /opt/alis-venv \
     && /opt/alis-venv/bin/python -m pip install --upgrade pip \
     && /opt/alis-venv/bin/pip install --no-cache-dir -r /opt/alis-python/requirements.txt
 
-RUN rm -rf /usr/local/tomcat/webapps/*
+RUN useradd --system --home /nonexistent --shell /usr/sbin/nologin alis \
+    && rm -rf /usr/local/tomcat/webapps/* \
+    && mkdir -p /var/log/supervisor /opt/alis-python/reports \
+    && chown -R alis:alis /opt/alis-python/reports
 COPY --from=java-build /build/java/target/alis.war /usr/local/tomcat/webapps/alis.war
 COPY deploy/supervisord.conf /etc/supervisor/conf.d/alis.conf
 COPY deploy/entrypoint.sh /usr/local/bin/alis-entrypoint
 
-RUN chmod +x /usr/local/bin/alis-entrypoint \
-    && mkdir -p /var/log/supervisor /opt/alis-python/reports
+RUN chmod +x /usr/local/bin/alis-entrypoint
 
 EXPOSE 10000
 ENTRYPOINT ["/usr/local/bin/alis-entrypoint"]
