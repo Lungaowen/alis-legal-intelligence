@@ -1,16 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
-: "$REDIS_URL" >/dev/null
+
+: "${REDIS_URL:?Set REDIS_URL}"
+
 PORT="${PORT:-10000}"
 python3 - "$PORT" <<'PY'
-import re,sys
+import sys
 from pathlib import Path
-p=Path("/usr/local/tomcat/conf/server.xml"); x=p.read_text()
-x,c=re.subn(r'(<Server\b[^>]*?\bport=")-?\d+("',lambda m:f"{m.group(1)}-1{m.group(2)}",x,count=1,flags=re.S)
-if c!=1: raise SystemExit("shutdown socket not found")
-x,c=re.subn(r'(<Connector\b[^>]*?\bport=")8080("',lambda m:f"{m.group(1)}{sys.argv[1]}{m.group(2)}",x,count=1,flags=re.S)
-if c!=1: raise SystemExit("HTTP connector not found")
-p.write_text(x)
+
+port = sys.argv[1]
+path = Path("/usr/local/tomcat/conf/server.xml")
+config = path.read_text(encoding="utf-8")
+
+old_server = 'port="8005"'
+old_connector = 'port="8080"'
+
+if old_server not in config:
+    raise SystemExit("Tomcat shutdown port 8005 was not found")
+config = config.replace(old_server, 'port="-1"', 1)
+
+if old_connector not in config:
+    raise SystemExit("Tomcat HTTP connector port 8080 was not found")
+config = config.replace(old_connector, f'port="{port}"', 1)
+
+path.write_text(config, encoding="utf-8")
 PY
+
 export CATALINA_OPTS="${CATALINA_OPTS:-} -XX:+UseSerialGC -XX:MaxRAMPercentage=42.0"
+
 exec /usr/bin/supervisord -n -c /etc/supervisor/supervisord.conf
