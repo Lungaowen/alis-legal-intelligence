@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 : "\${REDIS_URL:?Set REDIS_URL}"
-: "\${ALIS_JWT_SECRET:?Set ALIS_JWT_SECRET}"
-: "\${ALIS_DB_URL:?Set ALIS_DB_URL}"
-: "\${ALIS_DB_USER:?Set ALIS_DB_USER}"
-: "\${ALIS_DB_PASSWORD:?Set ALIS_DB_PASSWORD}"
 PORT="\${PORT:-10000}"
 python3 - "\$PORT" <<'PY'
 import re,sys
